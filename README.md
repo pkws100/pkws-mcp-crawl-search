@@ -1,9 +1,10 @@
 # pkws-mcp-crawl-search
 
-Node.js/TypeScript MCP server for local-network search and crawling. The stack exposes a single MCP endpoint on port `8789`, keeps SearXNG internal to Docker, and supports both static HTML extraction and JavaScript-rendered crawling via Playwright.
+Node.js/TypeScript MCP server for local-network search and crawling. The stack exposes the main MCP endpoint on port `8789`, keeps SearXNG internal to Docker, and supports both static HTML extraction and JavaScript-rendered crawling via Playwright.
 
 ## Features
 - MCP endpoint at `http://<HOST-IP>:8789/mcp`
+- Optional legacy stream endpoint at `http://<HOST-IP>:8789/mcp/stream`
 - Health endpoint at `http://<HOST-IP>:8789/health`
 - Internal SearXNG-backed `web_search`
 - `fetch_url_text` for direct text extraction
@@ -53,7 +54,12 @@ cp .env.example .env
 ```
 
 - `MCP_PORT=8789`
-- `MCP_BIND=0.0.0.0`
+- `MCP_BIND_HOST=0.0.0.0`
+- `MCP_BIND=` legacy alias for `MCP_BIND_HOST`
+- `MCP_ALLOWED_HOSTS=` comma-separated extra allowed hostnames
+- `MCP_LOG_REQUESTS=false`
+- `MCP_ENABLE_LEGACY_SSE=true`
+- `MCP_LEGACY_SSE_PATH=/mcp/stream`
 - `SEARXNG_BASE=http://searxng:8080`
 - `MCP_AUTH_TOKEN=` optional bearer token
 - `BLOCK_PRIVATE_NET=true`
@@ -81,6 +87,55 @@ Example `mcp.json` for LM Studio or a similar MCP-capable client:
 ```
 
 If `MCP_AUTH_TOKEN` is empty, omit the `Authorization` header.
+
+`/mcp` is the recommended auto-negotiating endpoint for both LM Studio and OpenWebUI.
+`/mcp/stream` is an optional legacy route that always stays on the streamable/session-based transport.
+
+## OpenWebUI Notes
+
+- `GET /mcp` without `Accept: text/event-stream` now returns a small JSON reachability response instead of `406`.
+- `POST /mcp` can negotiate a JSON-compatible MCP flow for clients such as OpenWebUI that do not send the stricter Streamable-HTTP `Accept` header set.
+- `Host` validation now allows `localhost`, `127.0.0.1`, `[::1]`, the machine hostname, `host.docker.internal`, LAN IPs, and any additional names listed in `MCP_ALLOWED_HOSTS`.
+
+## Curl Examples
+
+Health:
+
+```bash
+curl http://localhost:8789/health
+```
+
+Reachability probe for OpenWebUI-style checks:
+
+```bash
+curl -i http://localhost:8789/mcp -H "Authorization: Bearer <TOKEN>"
+```
+
+JSON-compatible initialize request:
+
+```bash
+curl -i http://localhost:8789/mcp \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "MCP-Protocol-Version: 2025-03-26" \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"curl\",\"version\":\"1.0.0\"}}}"
+```
+
+Optional legacy LM Studio endpoint:
+
+```json
+{
+  "mcpServers": {
+    "pkws-tools": {
+      "url": "http://<HOST-IP>:8789/mcp/stream",
+      "headers": {
+        "Authorization": "Bearer <TOKEN>"
+      }
+    }
+  }
+}
+```
 
 ## Tool Usage Pattern
 - Start with `web_search` to discover relevant public pages.
@@ -139,7 +194,7 @@ If `MCP_AUTH_TOKEN` is empty, omit the `Authorization` header.
 - SSRF protection blocks localhost, RFC1918, link-local, loopback, and unique-local targets by default.
 - Redirect destinations are validated again before each follow-up request.
 - `ALLOW_PRIVATE_NET=true` is the only supported override for private network access.
-- Host headers are validated against the local bind address, localhost aliases, and machine hostname to reduce DNS-rebinding risk on LAN deployments.
+- Host headers are validated against localhost aliases, the machine hostname, `host.docker.internal`, and any names from `MCP_ALLOWED_HOSTS` to reduce DNS-rebinding risk on LAN deployments without blocking common Docker-to-host traffic.
 - The server logs metadata only and never writes full page contents or auth tokens to logs.
 
 ## Troubleshooting
@@ -147,7 +202,8 @@ If `MCP_AUTH_TOKEN` is empty, omit the `Authorization` header.
 - A second common cause is SearXNG bot-detection rejecting API-style requests; this repo now sends browser-like `Accept` and `Accept-Language` headers to reduce that risk.
 - If `web_search` returns `[]` for a domain or brand query, the server now retries internal query variants such as `site:domain.tld topic` and may fall back to a direct public homepage fetch before returning an empty array.
 - Even with the fallback, `web_search` can still return `[]` when neither SearXNG nor the target site exposes enough public content for a minimally useful result.
-- The MCP endpoint now keeps Streamable HTTP sessions alive for follow-up calls. This is especially important for LM Studio, which tends to make several `web_search` calls back-to-back in one session.
+- `/mcp` now auto-negotiates between session-aware Streamable HTTP and a JSON-compatible MCP mode. This keeps LM Studio stable while allowing OpenWebUI connection checks and JSON-oriented requests to succeed.
+- The optional `/mcp/stream` endpoint keeps the previous session-aware Streamable HTTP behavior for clients that prefer an explicit legacy route.
 - `web_search` is intentionally budgeted with short per-attempt timeouts and a fixed total runtime budget so repeated brand/domain searches do not stall the client connection.
 - If a model confuses `crawl_rendered` with `crawl_static`, `crawl_rendered` now tolerates `start_url` as an alias for `url` and ignores harmless crawl-only fields like `max_pages`. It still renders exactly one page.
 - After changing SearXNG settings, rebuild and restart the stack with `docker compose up -d --build`.

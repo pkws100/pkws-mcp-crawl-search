@@ -47,6 +47,7 @@ ok
 
 - MCP endpoint: `http://localhost:8789/mcp`
 - LAN endpoint: `http://<HOST-IP>:8789/mcp`
+- Optional legacy stream endpoint: `http://<HOST-IP>:8789/mcp/stream`
 - SearXNG is internal only and does not publish a host port
 
 ## Environment Variables
@@ -54,7 +55,12 @@ ok
 The server works with safe defaults, but these are the key overrides:
 
 - `MCP_PORT=8789`
-- `MCP_BIND=0.0.0.0`
+- `MCP_BIND_HOST=0.0.0.0`
+- `MCP_BIND=` legacy alias for `MCP_BIND_HOST`
+- `MCP_ALLOWED_HOSTS=` comma-separated extra allowed hostnames
+- `MCP_LOG_REQUESTS=false`
+- `MCP_ENABLE_LEGACY_SSE=true`
+- `MCP_LEGACY_SSE_PATH=/mcp/stream`
 - `SEARXNG_BASE=http://searxng:8080`
 - `MCP_AUTH_TOKEN=` optional bearer token
 - `BLOCK_PRIVATE_NET=true`
@@ -89,6 +95,7 @@ Use the same MCP URL and auth pattern in every client:
 ```
 
 If you are connecting from the same machine, `localhost` is fine. For another machine on the LAN, use the host IP.
+`/mcp` auto-negotiates between streamable and JSON-compatible MCP behavior; `/mcp/stream` is the optional explicit legacy route.
 
 ## Recommended Tool Flow
 
@@ -113,7 +120,8 @@ If you are connecting from the same machine, `localhost` is fine. For another ma
 - This repo mounts `searxng/settings.yml` into the SearXNG container and expects that file to stay in sync with Compose.
 - A second common cause for `403` is SearXNG bot-detection rejecting API-like headers. The MCP server now sends browser-like `Accept` and `Accept-Language` headers to reduce false positives.
 - If `web_search` returns `[]` for a brand or domain query, the server now retries internal search rewrites and may fall back to a direct public homepage fetch. A remaining empty result usually means the configured search engines or the target site provide too little public context.
-- The `/mcp` endpoint now keeps Streamable HTTP sessions alive, which improves stability for clients such as LM Studio that issue several follow-up tool calls after one initialization.
+- The `/mcp` endpoint now auto-negotiates between session-aware Streamable HTTP and a JSON-compatible MCP mode for clients that do not send the stricter SSE-oriented `Accept` headers.
+- The optional `/mcp/stream` endpoint preserves the explicit legacy/session-aware Streamable HTTP behavior.
 - `web_search` uses a fixed total budget and shorter per-attempt timeouts to avoid long-running search bursts that can lead clients to close the connection.
 - After changing SearXNG settings, rebuild the stack with `docker compose up -d --build`.
 

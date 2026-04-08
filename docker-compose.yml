@@ -28,7 +28,12 @@ services:
     restart: unless-stopped
     environment:
       MCP_PORT: ${MCP_PORT:-8789}
-      MCP_BIND: ${MCP_BIND:-0.0.0.0}
+      MCP_BIND_HOST: ${MCP_BIND_HOST:-0.0.0.0}
+      MCP_BIND: ${MCP_BIND:-}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
+      MCP_LOG_REQUESTS: ${MCP_LOG_REQUESTS:-false}
+      MCP_ENABLE_LEGACY_SSE: ${MCP_ENABLE_LEGACY_SSE:-true}
+      MCP_LEGACY_SSE_PATH: ${MCP_LEGACY_SSE_PATH:-/mcp/stream}
       SEARXNG_BASE: ${SEARXNG_BASE:-http://searxng:8080}
       MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
       BLOCK_PRIVATE_NET: ${BLOCK_PRIVATE_NET:-true}

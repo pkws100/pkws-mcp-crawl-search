@@ -3,6 +3,10 @@ import { z } from "zod";
 export interface AppConfig {
   mcpPort: number;
   mcpBind: string;
+  mcpAllowedHosts: string[];
+  mcpLogRequests: boolean;
+  mcpEnableLegacySse: boolean;
+  mcpLegacySsePath: string;
   searxngBase: string;
   mcpAuthToken?: string;
   blockPrivateNet: boolean;
@@ -22,7 +26,12 @@ export interface AppConfig {
 
 const envSchema = z.object({
   MCP_PORT: z.coerce.number().int().min(1).max(65535).default(8789),
-  MCP_BIND: z.string().min(1).default("0.0.0.0"),
+  MCP_BIND_HOST: z.string().optional(),
+  MCP_BIND: z.string().optional(),
+  MCP_ALLOWED_HOSTS: z.string().optional(),
+  MCP_LOG_REQUESTS: z.string().optional().default("false"),
+  MCP_ENABLE_LEGACY_SSE: z.string().optional().default("true"),
+  MCP_LEGACY_SSE_PATH: z.string().optional().default("/mcp/stream"),
   SEARXNG_BASE: z.string().url().default("http://searxng:8080"),
   MCP_AUTH_TOKEN: z.string().optional(),
   BLOCK_PRIVATE_NET: z.string().optional().default("true"),
@@ -41,12 +50,35 @@ function parseBoolean(value: string | undefined, defaultValue: boolean): boolean
   return ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }
 
+function parseList(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function normalizeRoutePath(value: string | undefined, fallback: string): string {
+  const raw = value?.trim() || fallback;
+  const withLeadingSlash = raw.startsWith("/") ? raw : `/${raw}`;
+  return withLeadingSlash.length > 1 ? withLeadingSlash.replace(/\/+$/, "") : withLeadingSlash;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.parse(env);
+  const bindHost = (parsed.MCP_BIND_HOST?.trim() || parsed.MCP_BIND?.trim() || "0.0.0.0");
+  const legacySsePath = normalizeRoutePath(parsed.MCP_LEGACY_SSE_PATH, "/mcp/stream");
 
   return {
     mcpPort: parsed.MCP_PORT,
-    mcpBind: parsed.MCP_BIND,
+    mcpBind: z.string().min(1).parse(bindHost),
+    mcpAllowedHosts: parseList(parsed.MCP_ALLOWED_HOSTS),
+    mcpLogRequests: parseBoolean(parsed.MCP_LOG_REQUESTS, false),
+    mcpEnableLegacySse: parseBoolean(parsed.MCP_ENABLE_LEGACY_SSE, true),
+    mcpLegacySsePath: legacySsePath,
     searxngBase: parsed.SEARXNG_BASE.replace(/\/+$/, ""),
     mcpAuthToken: parsed.MCP_AUTH_TOKEN?.trim() || undefined,
     blockPrivateNet: parseBoolean(parsed.BLOCK_PRIVATE_NET, true),

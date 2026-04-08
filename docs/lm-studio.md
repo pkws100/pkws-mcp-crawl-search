@@ -34,10 +34,38 @@ Notes:
 - Replace `<HOST-IP>` with `localhost` when LM Studio runs on the same machine as Docker.
 - Omit the `headers` block when `MCP_AUTH_TOKEN` is empty.
 - Keep the server on `8789`; the port is fixed by design.
+- `/mcp` is the recommended endpoint and now auto-negotiates between the stricter streamable transport and a JSON-compatible MCP mode used by other clients such as OpenWebUI.
+- If you want an explicit legacy/session-oriented route for LM Studio, set the URL to `http://<HOST-IP>:8789/mcp/stream`.
 - `web_search` depends on the internal SearXNG container, so after SearXNG config changes you should restart with `docker compose up -d --build`.
 - `web_search` still returns a plain array of `{ title, url, snippet }`, but for domain and brand queries it may internally try extra query variants and a direct public-site fallback before returning `[]`.
 - The MCP endpoint uses session-aware Streamable HTTP handling so LM Studio can reuse one initialized session for several follow-up tool calls.
 - `web_search` is deliberately time-budgeted. Short per-attempt timeouts and a fixed total search budget reduce the chance that LM Studio closes the client connection during repeated follow-up searches.
+
+## Relevant Environment Variables
+
+- `MCP_BIND_HOST=0.0.0.0`
+- `MCP_BIND=` legacy alias for `MCP_BIND_HOST`
+- `MCP_ALLOWED_HOSTS=` comma-separated extra allowed hostnames
+- `MCP_LOG_REQUESTS=false`
+- `MCP_ENABLE_LEGACY_SSE=true`
+- `MCP_LEGACY_SSE_PATH=/mcp/stream`
+- `MCP_AUTH_TOKEN=`
+
+## Curl Checks
+
+Reachability:
+
+```bash
+curl -i http://localhost:8789/mcp -H "Authorization: Bearer <TOKEN>"
+```
+
+Explicit legacy stream endpoint:
+
+```bash
+curl -i http://localhost:8789/mcp/stream \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Accept: text/event-stream"
+```
 
 ## Recommended Workflow
 

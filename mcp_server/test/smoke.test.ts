@@ -15,6 +15,10 @@ function testConfig(): AppConfig {
   return {
     mcpPort: 8789,
     mcpBind: "127.0.0.1",
+    mcpAllowedHosts: [],
+    mcpLogRequests: false,
+    mcpEnableLegacySse: true,
+    mcpLegacySsePath: "/mcp/stream",
     searxngBase: "http://searxng:8080",
     mcpAuthToken: undefined,
     blockPrivateNet: true,
@@ -141,10 +145,39 @@ async function startSearx(): Promise<{ server: HttpServer; baseUrl: string }> {
   };
 }
 
-async function postMcp(baseUrl: string, body: unknown, sessionId?: string): Promise<Response> {
+async function requestStatusWithHost(baseUrl: string, path: string, hostHeader: string): Promise<number> {
+  const url = new URL(baseUrl);
+
+  return new Promise<number>((resolve, reject) => {
+    const req = request({
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port,
+      path,
+      method: "GET",
+      headers: {
+        Host: hostHeader
+      },
+      setHost: false
+    }, (res) => {
+      res.resume();
+      resolve(res.statusCode ?? 0);
+    });
+
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+async function postMcp(
+  baseUrl: string,
+  body: unknown,
+  sessionId?: string,
+  options: { accept?: string; path?: string } = {}
+): Promise<Response> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    accept: "application/json, text/event-stream",
+    accept: options.accept ?? "application/json, text/event-stream",
     "mcp-protocol-version": PROTOCOL_VERSION
   };
 
@@ -152,10 +185,34 @@ async function postMcp(baseUrl: string, body: unknown, sessionId?: string): Prom
     headers["mcp-session-id"] = sessionId;
   }
 
-  return fetch(`${baseUrl}/mcp`, {
+  return fetch(`${baseUrl}${options.path ?? "/mcp"}`, {
     method: "POST",
     headers,
     body: JSON.stringify(body)
+  });
+}
+
+async function getMcp(
+  baseUrl: string,
+  options: { accept?: string; path?: string; sessionId?: string; authorization?: string } = {}
+): Promise<Response> {
+  const headers: Record<string, string> = {};
+
+  if (options.accept) {
+    headers.accept = options.accept;
+  }
+
+  if (options.sessionId) {
+    headers["mcp-session-id"] = options.sessionId;
+  }
+
+  if (options.authorization) {
+    headers.Authorization = options.authorization;
+  }
+
+  return fetch(`${baseUrl}${options.path ?? "/mcp"}`, {
+    method: "GET",
+    headers
   });
 }
 
@@ -402,21 +459,29 @@ describe("smoke", () => {
     const appServer = await startApp(testConfig());
     servers.push(appServer.server);
 
-    const status = await new Promise<number>((resolve, reject) => {
-      const req = request(`${appServer.baseUrl}/health`, {
-        method: "GET",
-        headers: {
-          Host: "evil.example"
-        }
-      }, (res) => {
-        res.resume();
-        resolve(res.statusCode ?? 0);
-      });
-      req.on("error", reject);
-      req.end();
-    });
+    const status = await requestStatusWithHost(appServer.baseUrl, "/health", "evil.example");
 
     expect(status).toBe(403);
+  });
+
+  it("allows host.docker.internal by default", async () => {
+    const appServer = await startApp(testConfig());
+    servers.push(appServer.server);
+
+    const status = await requestStatusWithHost(appServer.baseUrl, "/health", "host.docker.internal");
+
+    expect(status).toBe(200);
+  });
+
+  it("allows configured extra host headers", async () => {
+    const config = testConfig();
+    config.mcpAllowedHosts = ["openwebui.local"];
+    const appServer = await startApp(config);
+    servers.push(appServer.server);
+
+    const status = await requestStatusWithHost(appServer.baseUrl, "/health", "openwebui.local");
+
+    expect(status).toBe(200);
   });
 
   it("allows lan-style ip host headers", async () => {
@@ -425,21 +490,107 @@ describe("smoke", () => {
     const appServer = await startApp(config);
     servers.push(appServer.server);
 
-    const status = await new Promise<number>((resolve, reject) => {
-      const req = request(`${appServer.baseUrl}/health`, {
-        method: "GET",
-        headers: {
-          Host: "192.168.1.50"
-        }
-      }, (res) => {
-        res.resume();
-        resolve(res.statusCode ?? 0);
-      });
-      req.on("error", reject);
-      req.end();
-    });
+    const status = await requestStatusWithHost(appServer.baseUrl, "/health", "192.168.1.50");
 
     expect(status).toBe(200);
+  });
+
+  it("returns JSON reachability info on GET /mcp without SSE accept", async () => {
+    const appServer = await startApp(testConfig());
+    servers.push(appServer.server);
+
+    const response = await getMcp(appServer.baseUrl);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+
+    const payload = await response.json() as {
+      status?: string;
+      endpoint?: string;
+      modes?: string[];
+    };
+    expect(payload.status).toBe("ok");
+    expect(payload.endpoint).toBe("/mcp");
+    expect(payload.modes).toContain("json-compat");
+  });
+
+  it("supports initialize and tool calls over JSON-compatible /mcp requests", async () => {
+    const site = await startSite();
+    servers.push(site.server);
+
+    const appServer = await startApp(testConfig());
+    servers.push(appServer.server);
+
+    const initializeResponse = await postMcp(
+      appServer.baseUrl,
+      {
+        jsonrpc: "2.0",
+        id: 20,
+        method: "initialize",
+        params: {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: {
+            name: "openwebui-test",
+            version: "1.0.0"
+          }
+        }
+      },
+      undefined,
+      {
+        accept: "application/json"
+      }
+    );
+
+    expect(initializeResponse.status).toBe(200);
+    expect(initializeResponse.headers.get("content-type")).toContain("application/json");
+    const sessionId = initializeResponse.headers.get("mcp-session-id");
+    expect(sessionId).toBeTruthy();
+
+    const initializedResponse = await postMcp(
+      appServer.baseUrl,
+      {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+        params: {}
+      },
+      sessionId ?? undefined,
+      {
+        accept: "application/json"
+      }
+    );
+    expect(initializedResponse.status).toBe(202);
+
+    const toolCallResponse = await postMcp(
+      appServer.baseUrl,
+      {
+        jsonrpc: "2.0",
+        id: 21,
+        method: "tools/call",
+        params: {
+          name: "fetch_url_text",
+          arguments: {
+            url: `${site.baseUrl}/a`,
+            max_chars: 500,
+            timeout_ms: 10_000
+          }
+        }
+      },
+      sessionId ?? undefined,
+      {
+        accept: "application/json"
+      }
+    );
+
+    expect(toolCallResponse.status).toBe(200);
+    expect(toolCallResponse.headers.get("content-type")).toContain("application/json");
+    const payload = await toolCallResponse.json() as {
+      error?: { message?: string };
+      result?: { structuredContent?: { title?: string; status?: number; text?: string } };
+    };
+    expect(payload.error).toBeUndefined();
+    expect(payload.result?.structuredContent?.status).toBe(200);
+    expect(payload.result?.structuredContent?.title).toBe("Page A");
+    expect(payload.result?.structuredContent?.text).toContain("Alpha page text.");
   });
 
   it("reuses the same MCP session for sequential web_search calls", async () => {
@@ -515,5 +666,22 @@ describe("smoke", () => {
       result?: { content?: Array<{ text?: string }> };
     };
     expect(secondSearchPayload.result?.content?.[0]?.text).toContain("pow24.org/");
+  });
+
+  it("keeps the legacy stream route protected by auth", async () => {
+    const config = testConfig();
+    config.mcpAuthToken = "secret-token";
+    const appServer = await startApp(config);
+    servers.push(appServer.server);
+
+    const unauthorized = await fetch(`${appServer.baseUrl}${config.mcpLegacySsePath}`);
+    expect(unauthorized.status).toBe(401);
+
+    const authorized = await getMcp(appServer.baseUrl, {
+      path: config.mcpLegacySsePath,
+      accept: "text/event-stream",
+      authorization: "Bearer secret-token"
+    });
+    expect(authorized.status).toBe(400);
   });
 });
